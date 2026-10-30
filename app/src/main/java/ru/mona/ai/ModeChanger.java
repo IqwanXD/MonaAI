@@ -286,6 +286,10 @@ public class ModeChanger {
 		String calc = Math.calc(text);
 		if (calc != null) return calc;
 
+		// 1b) waktu & tanggal: besok, kemarin, 27 hari lagi, hari apa, jam berapa, ...
+		String when = timeReply(text);
+		if (when != null) return when;
+
 		if (!loaded) {
 			return "⚠️ Gagal memuat `model.json`: " + loadError
 					+ "\n\nLetakkan file di `assets/model.json` atau di folder `files` aplikasi.";
@@ -321,6 +325,124 @@ public class ModeChanger {
 		}
 
 		return fallback(toks);
+	}
+
+	/* ---------- waktu & tanggal (offline, dihitung dari jam perangkat) ---------- */
+
+	private static final String[] HARI = {"Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"};
+	private static final String[] BULAN = {"Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
+			"Agustus", "September", "Oktober", "November", "Desember"};
+	private static final java.util.regex.Pattern P_HARI_LAGI = java.util.regex.Pattern.compile(
+			"(\\d{1,4})\\s*hari\\s*(lagi|kemudian|ke depan|dari sekarang|dari hari ini|setelah ini)");
+	private static final java.util.regex.Pattern P_JAM_LAGI = java.util.regex.Pattern.compile(
+			"(\\d{1,3})\\s*jam\\s*(lagi|kemudian|ke depan|dari sekarang|setelah ini)");
+	private static final java.util.regex.Pattern P_JAM_LALU = java.util.regex.Pattern.compile(
+			"(\\d{1,3})\\s*jam\\s*(yang lalu|lalu|sebelumnya)");
+	private static final java.util.regex.Pattern P_HARI_LALU = java.util.regex.Pattern.compile(
+			"(\\d{1,4})\\s*hari\\s*(yang lalu|lalu|sebelum ini|sebelumnya)");
+
+	/** Jawaban soal waktu secara lokal. Null jika kalimat ini bukan pertanyaan waktu. */
+	String timeReply(String input) {
+		String q = input.toLowerCase(Locale.ROOT).replaceAll("\\s+", " ").trim();
+		java.util.Calendar now = java.util.Calendar.getInstance();
+
+		boolean asksDate = q.contains("hari apa") || q.contains("hari apakah") || q.contains("hari berapa")
+				|| q.contains("tanggal") || q.contains("tgl") || q.contains("bulan apa")
+				|| q.contains("tahun apa") || q.contains("tahun berapa") || q.contains("hari ini");
+		boolean asksTime = q.contains("jam berapa") || q.contains("pukul berapa") || q.contains("jam brp")
+				|| q.contains("jam sekarang") || q.contains("sekarang jam");
+		int words = q.isEmpty() ? 0 : q.split(" ").length;
+
+		// "8 jam lagi jam berapa", "3 jam yang lalu jam berapa": tebak dari jam sekarang
+		java.util.regex.Matcher hm = P_JAM_LAGI.matcher(q);
+		int hourOffset = 0;
+		boolean hourAsk = false;
+		if (hm.find()) { hourOffset = parseHours(hm.group(1)); hourAsk = true; }
+		else {
+			hm = P_JAM_LALU.matcher(q);
+			if (hm.find()) { hourOffset = -parseHours(hm.group(1)); hourAsk = true; }
+		}
+		if (hourAsk && (asksTime || asksDate || words <= 5)) {
+			java.util.Calendar at = java.util.Calendar.getInstance();
+			at.add(java.util.Calendar.HOUR_OF_DAY, hourOffset);
+			String jam = String.format(Locale.US, "pukul **%02d:%02d**",
+					at.get(java.util.Calendar.HOUR_OF_DAY), at.get(java.util.Calendar.MINUTE));
+			String sisi = hourOffset >= 0 ? java.lang.Math.abs(hourOffset) + " jam lagi" : java.lang.Math.abs(hourOffset) + " jam yang lalu";
+			boolean sameDay = at.get(java.util.Calendar.DAY_OF_YEAR) == now.get(java.util.Calendar.DAY_OF_YEAR)
+					&& at.get(java.util.Calendar.YEAR) == now.get(java.util.Calendar.YEAR);
+			String hari = sameDay ? "" : ", " + fullDate(at);
+			return sisi + " tepatnya " + jam + hari + ".";
+		}
+
+		if (asksTime && !asksDate) {
+			return String.format(Locale.US, "Sekarang pukul **%02d:%02d**.",
+					now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE));
+		}
+		if (q.contains("tahun apa") || q.contains("tahun berapa")) {
+			return "Sekarang tahun **" + now.get(java.util.Calendar.YEAR) + "**.";
+		}
+		if (q.contains("bulan apa") || q.contains("bulan berapa")) {
+			return "Sekarang bulan **" + BULAN[now.get(java.util.Calendar.MONTH)] + " "
+					+ now.get(java.util.Calendar.YEAR) + "**.";
+		}
+
+		// selisih hari: "27 hari lagi", "10 hari yang lalu", lalu kata penunjuk waktu
+		Integer offset = null;
+		java.util.regex.Matcher m = P_HARI_LAGI.matcher(q);
+		if (m.find()) offset = parseDays(m.group(1));
+		if (offset == null) {
+			m = P_HARI_LALU.matcher(q);
+			if (m.find()) { Integer n = parseDays(m.group(1)); offset = n == null ? null : -n; }
+		}
+		if (offset == null) {
+			if (q.contains("kemarin dulu")) offset = -2;
+			else if (q.contains("lusa")) offset = 2;
+			else if (q.contains("besok")) offset = 1;
+			else if (q.contains("kemarin")) offset = -1;
+			else if (q.contains("hari ini")) offset = 0;
+		}
+
+		if (offset == null) {
+			// hanya "hari apa / tanggal berapa" tanpa penunjuk: jawab untuk hari ini
+			if (asksDate && words <= 6) return "Hari ini jatuh pada **" + fullDate(now) + "**.";
+			return null;
+		}
+		// kalimat panjang yang kebetulan memuat "besok" bukan pertanyaan tanggal
+		if (!asksDate && words > 3) return null;
+
+		java.util.Calendar target = java.util.Calendar.getInstance();
+		target.add(java.util.Calendar.DAY_OF_MONTH, offset);
+		String date = fullDate(target);
+		int abs = java.lang.Math.abs(offset);
+		if (offset == 0) return "Hari ini jatuh pada **" + date + "**.";
+		if (offset == 1) return "Besok jatuh pada **" + date + "**.";
+		if (offset == 2) return "Lusa jatuh pada **" + date + "**.";
+		if (offset == -1) return "Kemarin jatuh pada **" + date + "**.";
+		if (offset == -2) return "Kemarin lusa jatuh pada **" + date + "**.";
+		if (offset > 0) return abs + " hari lagi jatuh pada **" + date + "**.";
+		return abs + " hari yang lalu jatuh pada **" + date + "**.";
+	}
+
+	private static int parseHours(String digits) {
+		try {
+			return java.lang.Math.min(Integer.parseInt(digits), 240);   // batas wajar: 10 hari
+		} catch (NumberFormatException e) {
+			return 0;
+		}
+	}
+
+	private static Integer parseDays(String digits) {
+		try {
+			int n = Integer.parseInt(digits);
+			return n <= 3650 ? n : null;   // batas wajar ~10 tahun
+		} catch (NumberFormatException e) {
+			return null;
+		}
+	}
+
+	private static String fullDate(java.util.Calendar c) {
+		return HARI[c.get(java.util.Calendar.DAY_OF_WEEK) - 1] + ", " + c.get(java.util.Calendar.DAY_OF_MONTH)
+				+ " " + BULAN[c.get(java.util.Calendar.MONTH)] + " " + c.get(java.util.Calendar.YEAR);
 	}
 
 	/** Perbaiki salah ketik: token yang tidak dikenal diganti kosakata terdekat (similaritas >= 0.8). */
